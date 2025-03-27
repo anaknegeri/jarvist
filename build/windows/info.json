@@ -1,0 +1,15 @@
+{
+  "fixed": {
+    "file_version": "1.1.0"
+  },
+  "info": {
+    "0000": {
+      "ProductVersion": "1.1.0",
+      "CompanyName": "Pitjarus Teknologi",
+      "FileDescription": "My Product Description",
+      "LegalCopyright": "(c) 2025, Pitjarus Teknologi",
+      "ProductName": "JARVIST",
+      "Comments": "This is a comment"
+    }
+  }
+}
