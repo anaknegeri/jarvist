@@ -35,10 +35,10 @@ type Client struct {
 	connectAttempt  int
 	connectTimer    *time.Timer
 	cleanDisconnect bool
-	// Tambahan untuk mencegah pengiriman duplikat
-	sentCache    map[string]bool
-	cacheMutex   sync.Mutex
-	cacheTimeout time.Duration
+	sentCache       map[string]bool
+	sentCacheTimes  map[string]time.Time
+	cacheMutex      sync.Mutex
+	cacheTimeout    time.Duration
 }
 
 // NewClient creates a new MQTT client
@@ -53,6 +53,7 @@ func NewClient(cfg *config.Config, logger *logger.Logger) (*Client, error) {
 		connectAttempt:  0,
 		cleanDisconnect: false,
 		sentCache:       make(map[string]bool),
+		sentCacheTimes:  make(map[string]time.Time),
 		cacheMutex:      sync.Mutex{},
 		cacheTimeout:    30 * time.Second, // Pesan disimpan di cache selama 30 detik
 	}
@@ -65,22 +66,35 @@ func NewClient(cfg *config.Config, logger *logger.Logger) (*Client, error) {
 
 // Fungsi untuk membersihkan cache secara berkala
 func (c *Client) cleanupCache() {
-	ticker := time.NewTicker(10 * time.Second) // Periksa setiap 10 detik
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
-		<-ticker.C
-		// Jika client sudah disconnected, hentikan goroutine
-		if c.cleanDisconnect {
-			return
-		}
+		select {
+		case <-ticker.C:
+			if c.cleanDisconnect {
+				return
+			}
 
-		c.cacheMutex.Lock()
-		// Jika cache terlalu besar, kosongkan
-		if len(c.sentCache) > 1000 {
-			c.sentCache = make(map[string]bool)
+			c.cacheMutex.Lock()
+
+			if len(c.sentCache) > 1000 {
+				c.sentCache = make(map[string]bool)
+				c.sentCacheTimes = make(map[string]time.Time)
+				c.cacheMutex.Unlock()
+				continue
+			}
+
+			now := time.Now()
+			for id, timestamp := range c.sentCacheTimes {
+				if now.Sub(timestamp) > c.cacheTimeout {
+					delete(c.sentCache, id)
+					delete(c.sentCacheTimes, id)
+				}
+			}
+
+			c.cacheMutex.Unlock()
 		}
-		c.cacheMutex.Unlock()
 	}
 }
 
@@ -264,6 +278,7 @@ func (c *Client) checkAndCacheMessage(messageID string) bool {
 	}
 
 	c.sentCache[messageID] = true
+	c.sentCacheTimes[messageID] = time.Now() // Store the timestamp
 
 	return false
 }

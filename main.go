@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"path"
+	"runtime"
+	"runtime/debug"
 	"time"
 
 	"jarvist/internal/common/buildinfo"
@@ -289,6 +291,17 @@ func main() {
 			}
 		}
 	}
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			<-ticker.C
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
+	}()
 
 	// ==========================================
 	// Jalankan Aplikasi

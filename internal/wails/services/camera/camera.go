@@ -113,6 +113,21 @@ func (s *CameraService) StopBackgroundChecking() {
 		s.backgroundCancelFn()
 	}
 	s.backgroundRunning = false
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func (s *CameraService) CleanupOldConnectionStatuses() {
+	s.statusMutex.Lock()
+	defer s.statusMutex.Unlock()
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+
+	for uuid, status := range s.connectionStatuses {
+		if status.LastChecked.Before(cutoff) {
+			delete(s.connectionStatuses, uuid)
+		}
+	}
 }
 
 func (s *CameraService) SetCheckInterval(interval time.Duration) {

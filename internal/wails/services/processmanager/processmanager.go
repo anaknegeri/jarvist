@@ -33,12 +33,13 @@ type EventData struct {
 }
 
 type ProcessManagerService struct {
-	app       *application.App
-	processes map[string]*exec.Cmd
-	mu        sync.Mutex
-	cfg       *config.Config
-	config    Config
-	logger    *logger.ContextLogger
+	app             *application.App
+	processes       map[string]*exec.Cmd
+	mu              sync.Mutex
+	cfg             *config.Config
+	config          Config
+	logger          *logger.ContextLogger
+	monitorStopChan chan struct{}
 }
 
 func New(cfg *config.Config, logger *logger.ContextLogger) *ProcessManagerService {
@@ -53,8 +54,12 @@ func New(cfg *config.Config, logger *logger.ContextLogger) *ProcessManagerServic
 	}
 }
 
-// ServiceStartup initializes the process manager
-func (s *ProcessManagerService) ServiceStartup(ctx context.Context, options application.ServiceOptions) error {
+func (s *ProcessManagerService) OnStartup(ctx context.Context, options application.ServiceOptions) error {
+	return nil
+}
+
+func (s *ProcessManagerService) OnShutdown() error {
+	s.StopStatusMonitor()
 	return nil
 }
 
@@ -75,12 +80,33 @@ func (s *ProcessManagerService) InitService(app *application.App) {
 
 func (s *ProcessManagerService) StartStatusMonitor() {
 	s.logger.Info("Starting process status monitor")
+
+	if s.monitorStopChan != nil {
+		close(s.monitorStopChan)
+	}
+	s.monitorStopChan = make(chan struct{})
+
 	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
 		for {
-			s.VerifyAllProcessStatusConsistency()
-			time.Sleep(10 * time.Second)
+			select {
+			case <-ticker.C:
+				s.VerifyAllProcessStatusConsistency()
+			case <-s.monitorStopChan:
+				s.logger.Info("Process status monitor stopped")
+				return
+			}
 		}
 	}()
+}
+
+func (s *ProcessManagerService) StopStatusMonitor() {
+	if s.monitorStopChan != nil {
+		close(s.monitorStopChan)
+		s.monitorStopChan = nil
+	}
 }
 
 func (s *ProcessManagerService) CheckRunningProcesses() {
