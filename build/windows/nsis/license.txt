@@ -1,0 +1,42 @@
+End-User License Agreement (EULA) for JarDist Desktop
+
+Please read this End-User License Agreement ("Agreement") carefully before installing or using JarDist Desktop (the "Software").
+
+1. LICENSE GRANT
+This Agreement grants you a personal, non-exclusive, non-transferable license to use the Software on your devices in accordance with the terms of this Agreement.
+
+2. RESTRICTIONS
+You may NOT:
+- Modify, reverse engineer, decompile, or disassemble the Software
+- Remove or alter any copyright notices on the Software
+- Use the Software for any illegal purposes
+- Transfer, sell, rent, or lease the Software to third parties
+
+3. THIRD-PARTY COMPONENTS
+The Software includes the following third-party components:
+- FFmpeg (http://ffmpeg.org)
+- MinGW-w64 (http://mingw-w64.org)
+These components are governed by their respective licenses.
+
+4. INTELLECTUAL PROPERTY
+The Software and any related documentation are protected by copyright laws and international copyright treaties, as well as other intellectual property laws and treaties.
+
+5. WARRANTY DISCLAIMER
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+6. LIMITATION OF LIABILITY
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+7. UPDATES
+The Software may automatically download and install updates. These updates are designed to improve, enhance and further develop the Software and may take the form of bug fixes, enhanced functions, new software modules and completely new versions.
+
+8. TERMINATION
+This Agreement is effective until terminated. Your rights under this Agreement will terminate automatically without notice if you fail to comply with any of its terms.
+
+9. GOVERNING LAW
+This Agreement shall be governed by and construed in accordance with the laws of [Your Country/State].
+
+By installing, copying, or otherwise using the Software, you agree to be bound by the terms of this Agreement. If you do not agree to the terms of this Agreement, do not install or use the Software.
+
+Copyright © 2024 [Your Company Name]
+All rights reserved.

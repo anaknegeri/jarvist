@@ -1,4 +1,4 @@
-version: '3'
+version: "3"
 
 tasks:
   go:mod:tidy:
@@ -38,7 +38,6 @@ tasks:
     vars:
       BUILD_COMMAND: '{{if eq .PRODUCTION "true"}}build{{else}}build:dev{{end}}'
 
-
   generate:bindings:
     summary: Generates bindings for the frontend
     deps:
@@ -58,10 +57,10 @@ tasks:
     sources:
       - "appicon.png"
     generates:
-      - "icons.icns"
-      - "icons.ico"
+      - "icon.icns"
+      - "icon.ico"
     cmds:
-      - wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icons.ico
+      - wails3 generate icons -input appicon.png -macfilename darwin/icon.icns -windowsfilename windows/icon.ico
 
   dev:frontend:
     summary: Runs the frontend in development mode

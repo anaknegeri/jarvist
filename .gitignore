@@ -1,5 +1,6 @@
 .task
 bin
+*.7z
 frontend/dist
 frontend/node_modules
 build/linux/appimage/build

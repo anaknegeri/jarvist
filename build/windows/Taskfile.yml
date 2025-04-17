@@ -3,6 +3,25 @@ version: "3"
 includes:
   common: ../Taskfile.yml
 
+vars:
+  DEFAULT_LICENSE_KEY: "default_insecure_key_for_production"
+  DEFAULT_LICENSE_SALT: "default_insecure_salt_for_production"
+  DEFAULT_CERT_PATH: "build/secrets/certificate.pfx"
+  DEFAULT_CERT_PASSWORD: ""
+  DEFAULT_TIMESTAMP_SERVER: "http://timestamp.digicert.com"
+
+  # Use PowerShell script to read secrets
+  LICENSE_KEY_VALUE:
+    sh: powershell -File build/secrets/read_secrets.ps1 "license.key" "{{.DEFAULT_LICENSE_KEY}}"
+  LICENSE_SALT_VALUE:
+    sh: powershell -File build/secrets/read_secrets.ps1 "license.salt" "{{.DEFAULT_LICENSE_SALT}}"
+  CERT_PATH_VALUE:
+    sh: powershell -File build/secrets/read_secrets.ps1 "signing.windows.cert_path" "{{.DEFAULT_CERT_PATH}}"
+  CERT_PASSWORD_VALUE:
+    sh: powershell -File build/secrets/read_secrets.ps1 "signing.windows.cert_password" "{{.DEFAULT_CERT_PASSWORD}}"
+  TIMESTAMP_SERVER_VALUE:
+    sh: powershell -File build/secrets/read_secrets.ps1 "signing.windows.timestamp_server" "{{.DEFAULT_TIMESTAMP_SERVER}}"
+
 tasks:
   build:
     summary: Builds the application for Windows
@@ -11,49 +30,99 @@ tasks:
       - task: common:build:frontend
         vars:
           PRODUCTION: "{{.PRODUCTION}}"
+      - task: common:update:build-assets
       - task: common:generate:icons
     cmds:
       - task: generate:syso
+      - task: copy:buildinfo
       - go build {{.BUILD_FLAGS}} -o {{.BIN_DIR}}/{{.APP_NAME}}.exe
+      - go build {{.SYNC_MANAGER_BUILD_FLAGS}} -o {{.BIN_DIR}}/sync-manager.exe ./cmd/syncmanager
       - cmd: powershell Remove-item *.syso
+      - cmd: powershell Remove-item cmd/syncmanager/*.syso
         platforms: [windows]
       - cmd: rm -f *.syso
+      - cmd: rm -f cmd/syncmanager/*.syso
         platforms: [linux, darwin]
     vars:
-      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
+      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui -X main.buildMode=production -X main.defaultLicenseKey={{.LICENSE_KEY}} -X main.defaultLicenseSalt={{.LICENSE_SALT}}"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
+      SYNC_MANAGER_BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui -X main.buildMode=production"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
+      LICENSE_KEY: "{{.LICENSE_KEY | default .LICENSE_KEY_VALUE}}"
+      LICENSE_SALT: "{{.LICENSE_SALT | default .LICENSE_SALT_VALUE}}"
     env:
       GOOS: windows
       CGO_ENABLED: 0
       GOARCH: "{{.ARCH | default ARCH}}"
       PRODUCTION: '{{.PRODUCTION | default "false"}}'
 
+  # New task to copy build info
+  copy:buildinfo:
+    summary: Copies build info to buildinfo directory
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - cp build/windows/info.json internal/common/buildinfo/info.json
+
+  sign:app:
+    desc: Signs the application executable with a code signing certificate
+    cmds:
+      - '{{.SIGNTOOL_PATH}} sign /f "{{.CERT_PATH}}" /p "{{.CERT_PASSWORD}}" /tr "{{.TIMESTAMP_SERVER}}" /td sha256 /fd sha256 "{{.BIN_DIR}}/{{.APP_NAME}}.exe"'
+    vars:
+      SIGNTOOL_PATH: "signtool.exe"
+      CERT_PATH: "{{.CERT_PATH | default .CERT_PATH_VALUE}}"
+      CERT_PASSWORD: "{{.CERT_PASSWORD | default .CERT_PASSWORD_VALUE}}"
+      TIMESTAMP_SERVER: "{{.TIMESTAMP_SERVER | default .TIMESTAMP_SERVER_VALUE}}"
+
+  sign:installer:
+    desc: Signs the installer with a code signing certificate
+    cmds:
+      - '{{.SIGNTOOL_PATH}} sign /f "{{.CERT_PATH}}" /p "{{.CERT_PASSWORD}}" /tr "{{.TIMESTAMP_SERVER}}" /td sha256 /fd sha256 "{{.BIN_DIR}}/{{.APP_NAME}}-{{.ARCH}}-Setup.exe"'
+    vars:
+      SIGNTOOL_PATH: "signtool.exe"
+      CERT_PATH: "{{.CERT_PATH | default .CERT_PATH_VALUE}}"
+      CERT_PASSWORD: "{{.CERT_PASSWORD | default .CERT_PASSWORD_VALUE}}"
+      TIMESTAMP_SERVER: "{{.TIMESTAMP_SERVER | default .TIMESTAMP_SERVER_VALUE}}"
+      ARCH: "{{.ARCH | default ARCH}}"
+
+  build:production:
+    summary: Builds the application for production
+    deps:
+      - task: common:update:build-assets
+    cmds:
+      - task: build
+        vars:
+          PRODUCTION: "true"
+      - task: sign:app
+
   package:
     summary: Packages a production build of the application into a `.exe` bundle
+    deps:
+      - task: build:production
     cmds:
       - task: create:nsis:installer
+      - task: sign:installer
 
   generate:syso:
     summary: Generates Windows `.syso` file
     dir: build
     cmds:
-      - wails3 generate syso -arch {{.ARCH}} -icon windows/icon.ico -manifest windows/wails.exe.manifest -info windows/info.json -out ../wails_windows_{{.ARCH}}.syso
+      - wails3 generate syso -arch {{.ARCH}} -icon windows/icon.ico -manifest windows/app.manifest -info windows/info.json -out ../wails_windows_{{.ARCH}}.syso
+      - wails3 generate syso -arch {{.ARCH}} -icon windows/icon.ico -manifest windows/app.manifest -info windows/info.json -out ../cmd/syncmanager/wails_windows_{{.ARCH}}.syso
     vars:
       ARCH: "{{.ARCH | default ARCH}}"
 
   create:nsis:installer:
     summary: Creates an NSIS installer
     dir: build/windows/nsis
-    deps:
-      - task: build
-        vars:
-          PRODUCTION: "true"
     cmds:
-      # Create the Microsoft WebView2 bootstrapper if it doesn't exist
       - wails3 generate webview2bootstrapper -dir "{{.ROOT_DIR}}\build\windows\nsis"
       - makensis -DARG_WAILS_{{.ARG_FLAG}}_BINARY="{{.ROOT_DIR}}\{{.BIN_DIR}}\{{.APP_NAME}}.exe" project.nsi
     vars:
       ARCH: "{{.ARCH | default ARCH}}"
       ARG_FLAG: '{{if eq .ARCH "amd64"}}AMD64{{else}}ARM64{{end}}'
+
+  vars:
+    SIGNTOOL_PATH: "signtool.exe"
+    CERT_PATH: "{{.CERT_PATH | default .CERT_PATH_VALUE}}"
+    CERT_PASSWORD: "{{.CERT_PASSWORD | default .CERT_PASSWORD_VALUE}}"
 
   run:
     cmds:
