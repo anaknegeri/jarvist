@@ -156,6 +156,8 @@ func (s *CameraService) runBackgroundChecker() {
 func (s *CameraService) checkAllCameraConnections() {
 	s.logger.Info("Running camera connection check for all cameras")
 
+	s.CleanupOldConnectionStatuses()
+
 	cameras, err := s.ListCamera()
 	if err != nil {
 		s.logger.Error("Error getting cameras for connection check: %v", err)
