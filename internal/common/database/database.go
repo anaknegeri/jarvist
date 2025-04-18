@@ -49,8 +49,8 @@ func SetupDatabase(cfg *config.Config, logger *logger.ContextLogger) error {
 	}
 
 	// Improve SQLite performance and reduce lock chances
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetMaxIdleConns(5)
+	sqlDB.SetMaxOpenConns(20)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	// SQLite specific optimizations
@@ -58,7 +58,7 @@ func SetupDatabase(cfg *config.Config, logger *logger.ContextLogger) error {
 	sqlDB.Exec("PRAGMA synchronous = NORMAL;")
 	sqlDB.Exec("PRAGMA cache_size = 5000;")
 	sqlDB.Exec("PRAGMA temp_store = MEMORY;")
-	sqlDB.Exec("PRAGMA busy_timeout = 5000;")
+	sqlDB.Exec("PRAGMA busy_timeout = 10000;")
 
 	logger.Info("Database connection established")
 

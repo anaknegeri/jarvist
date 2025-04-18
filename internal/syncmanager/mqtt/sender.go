@@ -58,6 +58,7 @@ type Sender struct {
 	cancel            context.CancelFunc
 	messageService    *message.MessageService
 	statsService      *stats.StatsService
+	workerSemaphore   chan struct{}
 }
 
 // NewSender creates a new MQTT sender
@@ -89,6 +90,7 @@ func NewSender(ctx context.Context, cfg *config.Config, db *gorm.DB, messageServ
 		cancel:          cancel,
 		messageService:  messageService,
 		statsService:    statsService,
+		workerSemaphore: make(chan struct{}, 5),
 	}
 
 	return t, nil
@@ -385,11 +387,15 @@ func (t *Sender) messageWorker() {
 				return
 			}
 
+			// Add semaphore here
+			t.workerSemaphore <- struct{}{} // Acquire semaphore
+
 			var existingMsg models.PendingMessage
 			if err := t.db.Where("id = ?", msg.ID).First(&existingMsg).Error; err != nil {
 				t.logger.Warning(ComponentWorker, "Failed to check message %d status: %v", msg.ID, err)
 			} else if existingMsg.Sent {
 				t.logger.Info(ComponentWorker, "Skipping already sent message ID %d", msg.ID)
+				<-t.workerSemaphore // Release semaphore
 				continue
 			}
 
@@ -412,6 +418,7 @@ func (t *Sender) messageWorker() {
 				}
 			}
 
+			<-t.workerSemaphore
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
@@ -654,7 +661,18 @@ func (t *Sender) checkPendingMessages() {
 
 		// Queue messages for sending with a small delay to avoid flooding
 		for i, msg := range msgs {
-			t.enqueueMessage(msg)
+			// Acquire semaphore to limit concurrent database operations
+			t.workerSemaphore <- struct{}{} // Acquire semaphore
+
+			// Process the message
+			func(message models.PendingMessage) {
+				defer func() {
+					<-t.workerSemaphore // Release semaphore when done
+				}()
+
+				t.enqueueMessage(message)
+			}(msg)
+
 			processed++
 
 			// Add a small delay every few messages

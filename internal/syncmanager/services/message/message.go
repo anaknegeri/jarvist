@@ -6,6 +6,9 @@ import (
 	"jarvist/internal/common/database"
 	"jarvist/internal/common/models"
 	"jarvist/pkg/logger"
+	"math"
+	"math/rand/v2"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -212,26 +215,66 @@ func (s *MessageService) MarkMessageSent(id uint) error {
 	}
 
 	extraInfo["sent_at"] = updateTime
-	extraInfo["processing"] = false // Clear processing flag when sent
+	extraInfo["processing"] = false
 	updatedExtraInfo, err := json.Marshal(extraInfo)
 	if err != nil {
 		return fmt.Errorf("failed to update extra info: %w", err)
 	}
 
-	result := s.db.Model(&models.PendingMessage{}).
-		Where("id = ?", id).
-		Updates(map[string]interface{}{
-			"sent":        true,
-			"retry_count": gorm.Expr("retry_count + 1"),
-			"extra_info":  string(updatedExtraInfo),
-		})
+	return RetryOnLocked(func() error {
+		return s.db.Model(&models.PendingMessage{}).
+			Where("id = ?", id).
+			Updates(map[string]interface{}{
+				"sent":        true,
+				"retry_count": gorm.Expr("retry_count + 1"),
+				"extra_info":  string(updatedExtraInfo),
+			}).Error
+	})
+}
 
-	if result.Error != nil {
-		return fmt.Errorf("failed to mark message as sent: %w", result.Error)
+func (s *MessageService) MarkMessagesSent(ids []uint) error {
+	if len(ids) == 0 {
+		return nil
 	}
 
-	s.logger.Info(database.ComponentMessages, "Marked message ID %d as sent", id)
-	return nil
+	return RetryOnLocked(func() error {
+		return s.db.Model(&models.PendingMessage{}).
+			Where("id IN (?)", ids).
+			Updates(map[string]interface{}{
+				"sent":        true,
+				"retry_count": gorm.Expr("retry_count + 1"),
+			}).Error
+	})
+}
+
+func (s *MessageService) MarkMessageSentWithBackoff(id uint) error {
+	var err error
+	maxRetries := 10
+	baseDelay := 50 * time.Millisecond
+	maxDelay := 10 * time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		delay := time.Duration(float64(baseDelay) * math.Pow(2, float64(i)))
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+		jitter := rand.Float64()*0.4 - 0.2
+		delay = time.Duration(float64(delay) * (1 + jitter))
+
+		err = s.MarkMessageSent(id)
+		if err == nil {
+			return nil
+		}
+
+		if strings.Contains(err.Error(), "database table is locked") {
+			time.Sleep(delay)
+			continue
+		}
+
+		return err
+	}
+
+	return fmt.Errorf("max retries exceeded: %w", err)
 }
 
 func (s *MessageService) CountPendingMessages() (int64, error) {
@@ -261,4 +304,28 @@ func (s *MessageService) HasOldPendingMessages(age time.Duration) (bool, error) 
 	}
 
 	return count > 0, nil
+}
+
+func RetryOnLocked(operation func() error) error {
+	var err error
+	maxRetries := 5
+	retryDelay := 100 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		err = operation()
+		if err == nil {
+			return nil
+		}
+
+		if strings.Contains(err.Error(), "database table is locked") ||
+			strings.Contains(err.Error(), "database is locked") {
+			time.Sleep(retryDelay)
+			retryDelay *= 2
+			continue
+		}
+
+		return err
+	}
+
+	return err
 }
