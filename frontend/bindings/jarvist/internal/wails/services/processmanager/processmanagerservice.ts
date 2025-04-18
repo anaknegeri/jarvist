@@ -36,6 +36,14 @@ export function IsProcessRunning(processId: string): $CancellablePromise<boolean
     return $Call.ByID(2296274736, processId);
 }
 
+export function OnShutdown(): $CancellablePromise<void> {
+    return $Call.ByID(1001473659);
+}
+
+export function OnStartup(options: application$0.ServiceOptions): $CancellablePromise<void> {
+    return $Call.ByID(953414586, options);
+}
+
 export function RestartProcess(processId: string): $CancellablePromise<boolean> {
     return $Call.ByID(3046066980, processId);
 }
@@ -50,6 +58,10 @@ export function StartStatusMonitor(): $CancellablePromise<void> {
 
 export function StopProcess(processId: string): $CancellablePromise<boolean> {
     return $Call.ByID(2394937337, processId);
+}
+
+export function StopStatusMonitor(): $CancellablePromise<void> {
+    return $Call.ByID(2517438352);
 }
 
 export function UpdateProcessStatusOnMissing(processId: string): $CancellablePromise<boolean> {

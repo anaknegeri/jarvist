@@ -76,11 +76,17 @@ func main() {
 
 	logOptions := logger.DefaultOptions()
 	logOptions.LogDir = appConfig.LogDir
+	logOptions.EnableDatabase = true
+	logOptions.EnableMQTT = true
 
 	if buildMode == "production" {
 		logOptions.FileMinLevel = logger.LevelWarn
+		logOptions.DbMinLevel = logger.LevelWarn
+		logOptions.MQTTMinLevel = logger.LevelWarn
 	} else {
 		logOptions.FileMinLevel = logger.LevelInfo
+		logOptions.DbMinLevel = logger.LevelWarn
+		logOptions.MQTTMinLevel = logger.LevelInfo
 	}
 
 	appLogger := logger.New(logOptions)
@@ -91,6 +97,8 @@ func main() {
 		log.Fatal("Failed to setup database: ", err)
 	}
 	defer database.CloseDatabase()
+
+	appLogger.SetDB(database.GetDB())
 
 	// Setup FFmpeg
 	if err := ffmpeg.SetupFFmpeg(appConfig, appLogger); err != nil {

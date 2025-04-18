@@ -9,10 +9,6 @@ export class MJPEGStreamConfig {
     "inputFile": string;
     "frameRate": number;
     "port": number;
-
-    /**
-     * 1-100, semakin tinggi semakin baik
-     */
     "quality": number;
 
     /** Creates a new MJPEGStreamConfig instance. */

@@ -36,6 +36,10 @@ export function CheckConnectionWithConfig(config: ffmpeg$0.RTSPConfig, takeScree
     return $Call.ByID(4050511744, config, takeScreenshot);
 }
 
+export function CleanupOldConnectionStatuses(): $CancellablePromise<void> {
+    return $Call.ByID(4021201905);
+}
+
 export function CreateCamera(input: models$0.CameraInput): $CancellablePromise<models$0.Camera | null> {
     return $Call.ByID(909368473, input).then(($result: any) => {
         return $$createType2($result);

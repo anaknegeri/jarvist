@@ -278,7 +278,7 @@ func (c *Client) checkAndCacheMessage(messageID string) bool {
 	}
 
 	c.sentCache[messageID] = true
-	c.sentCacheTimes[messageID] = time.Now() // Store the timestamp
+	c.sentCacheTimes[messageID] = time.Now()
 
 	return false
 }

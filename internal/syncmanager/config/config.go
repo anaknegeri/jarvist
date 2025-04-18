@@ -72,6 +72,7 @@ type Config struct {
 
 	Logger struct {
 		EnableMQTTLogs bool `json:"mqtt_Logs"`
+		EnableDBLogs   bool `json:"db_Logs"`
 	}
 }
 
@@ -105,6 +106,7 @@ func LoadConfig(buildMode string, baseConfig *baseConfig.Config) *Config {
 
 	cfg.Sync.Interval = 60
 	cfg.Logger.EnableMQTTLogs = true
+	cfg.Logger.EnableDBLogs = true
 
 	if buildMode == "production" {
 		setupProdConfigs(cfg)

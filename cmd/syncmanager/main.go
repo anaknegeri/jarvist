@@ -66,19 +66,23 @@ func main() {
 	logOptions := logger.DefaultOptions()
 	logOptions.LogDir = baseConfig.LogDir
 	logOptions.EnableMQTT = appConfig.Logger.EnableMQTTLogs
+	logOptions.EnableDatabase = appConfig.Logger.EnableDBLogs
 	logOptions.MQTTTopic = appConfig.MQTT.Topic + "/logs"
 
 	if *isDebug {
 		logOptions.Level = logger.LevelDebug
 		logOptions.MQTTMinLevel = logger.LevelInfo
 		logOptions.FileMinLevel = logger.LevelInfo
+		logOptions.DbMinLevel = logger.LevelInfo
 	} else {
 		logOptions.Level = logger.LevelInfo
 		logOptions.MQTTMinLevel = logger.LevelWarn
 		logOptions.FileMinLevel = logger.LevelWarn
+		logOptions.DbMinLevel = logger.LevelWarn
 	}
 
 	appLogger := logger.New(logOptions)
+	appLogger.SetDB(database.GetDB())
 	mainLogger := appLogger.WithComponent("syncmanager")
 
 	mainLogger.Info("Starting Jarvist Sync Manager v%s in %s mode",
@@ -119,6 +123,9 @@ func main() {
 	if err != nil {
 		mainLogger.Fatal("Failed to create MQTT sender: %v", err)
 	}
+
+	mqttAdapter := mqtt.NewLoggerAdapter(mqttSender)
+	appLogger.SetMQTTPublisher(mqttAdapter)
 
 	// Initialize synchronizer
 	mainLogger.Info("Creating synchronizer...")

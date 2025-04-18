@@ -29,7 +29,6 @@ const (
 
 // MQTTPublisher defines an interface for publishing log messages to MQTT
 type MQTTPublisher interface {
-	// Publish sends a message to an MQTT topic
 	Publish(topic string, payload interface{}) error
 }
 

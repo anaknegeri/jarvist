@@ -4,6 +4,7 @@ import (
 	"jarvist/internal/common/config"
 	"jarvist/internal/common/models"
 	"jarvist/pkg/logger"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -47,12 +48,17 @@ func SetupDatabase(cfg *config.Config, logger *logger.ContextLogger) error {
 		return err
 	}
 
-	// Set connection pool settings
+	// Improve SQLite performance and reduce lock chances
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetMaxOpenConns(100)
-	sqlDB.Exec("PRAGMA synchronous = NORMAL;") // Less synchronous, better performance
-	sqlDB.Exec("PRAGMA cache_size = 5000;")    // Larger cache for better performance
+	sqlDB.SetConnMaxLifetime(time.Hour)
+
+	// SQLite specific optimizations
+	sqlDB.Exec("PRAGMA journal_mode = WAL;")
+	sqlDB.Exec("PRAGMA synchronous = NORMAL;")
+	sqlDB.Exec("PRAGMA cache_size = 5000;")
 	sqlDB.Exec("PRAGMA temp_store = MEMORY;")
+	sqlDB.Exec("PRAGMA busy_timeout = 5000;")
 
 	logger.Info("Database connection established")
 

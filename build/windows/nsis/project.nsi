@@ -5,6 +5,7 @@ Unicode true
 !define REQUEST_EXECUTION_LEVEL "admin"
 
 SetCompressor /SOLID lzma
+SetCompress auto
 
 !include "wails_tools.nsh"
 !include "LogicLib.nsh"
@@ -166,12 +167,12 @@ Function .onInit
     Pop $0
     Pop $1
     Sleep 1000
-
-    # Check and uninstall existing service
-    Call CheckAndUninstallService
 FunctionEnd
 
 Section
+    DetailPrint "Checking and uninstalling existing Sync Manager service..."
+    Call CheckAndUninstallService
+
     DetailPrint "Ensuring application is not running..."
     nsExec::ExecToStack 'taskkill /F /IM ${PRODUCT_EXECUTABLE}'
     Pop $0

@@ -22,33 +22,40 @@ type MJPEGStreamConfig struct {
 	InputFile string `json:"inputFile"`
 	FrameRate int    `json:"frameRate"`
 	Port      int    `json:"port"`
-	Quality   int    `json:"quality"` // 1-100, semakin tinggi semakin baik
+	Quality   int    `json:"quality"`
 	IsRunning bool   `json:"-"`
 }
 
-// StreamService menangani streaming MJPEG langsung dari Go
 type StreamService struct {
-	app        *application.App
-	config     MJPEGStreamConfig
-	server     *http.Server
-	mu         sync.Mutex
-	clients    map[chan []byte]bool
-	clientsMu  sync.Mutex
-	stopChan   chan struct{}
-	frameCache []byte // Cache frame terbaru
+	app          *application.App
+	config       MJPEGStreamConfig
+	server       *http.Server
+	mu           sync.Mutex
+	clients      map[chan []byte]bool
+	clientsMu    sync.Mutex
+	stopChan     chan struct{}
+	frameCache   []byte
+	ctx          context.Context
+	cancelFunc   context.CancelFunc
+	lastActivity map[chan []byte]time.Time
 }
 
-// NewService membuat instance baru server MJPEG
 func New() *StreamService {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &StreamService{
 		config: MJPEGStreamConfig{
 			InputFile: "bin/services/image/image.jpg",
 			FrameRate: 10,
 			Port:      8088,
-			Quality:   75,
+			Quality:   100,
 			IsRunning: false,
 		},
-		clients: make(map[chan []byte]bool),
+		clients:      make(map[chan []byte]bool),
+		stopChan:     make(chan struct{}),
+		ctx:          ctx,
+		cancelFunc:   cancel,
+		lastActivity: make(map[chan []byte]time.Time),
 	}
 }
 
@@ -56,12 +63,10 @@ func (s *StreamService) OnStartup(ctx context.Context, options application.Servi
 	return nil
 }
 
-// InitService menginisialisasi service dengan instance aplikasi
 func (s *StreamService) InitService(app *application.App) {
 	s.app = app
 }
 
-// UpdateConfig memperbarui konfigurasi server
 func (s *StreamService) UpdateConfig(config MJPEGStreamConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -71,38 +76,36 @@ func (s *StreamService) UpdateConfig(config MJPEGStreamConfig) {
 	s.config.IsRunning = isRunning
 }
 
-// GetConfig mengembalikan konfigurasi server saat ini
 func (s *StreamService) GetConfig() MJPEGStreamConfig {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.config
 }
 
-// GetStreamURL mengembalikan URL untuk mengakses stream
 func (s *StreamService) GetStreamURL() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return fmt.Sprintf("http://localhost:%d/stream", s.config.Port)
 }
 
-// registerClient menambahkan klien baru yang akan menerima frame
 func (s *StreamService) registerClient(client chan []byte) {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 	s.clients[client] = true
+	s.lastActivity[client] = time.Now()
 
 	if s.app != nil {
 		s.app.Logger.Info("New client connected")
 	}
 }
 
-// unregisterClient menghapus klien ketika koneksi terputus
 func (s *StreamService) unregisterClient(client chan []byte) {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 
 	if _, ok := s.clients[client]; ok {
 		delete(s.clients, client)
+		delete(s.lastActivity, client)
 		close(client)
 
 		if s.app != nil {
@@ -111,29 +114,48 @@ func (s *StreamService) unregisterClient(client chan []byte) {
 	}
 }
 
-// broadcastFrame mengirim frame ke semua klien yang terhubung
-func (s *StreamService) broadcastFrame(frameData []byte) {
+func (s *StreamService) cleanupInactiveClients() {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 
-	// Update cache frame
-	s.frameCache = frameData
+	now := time.Now()
+	timeout := 2 * time.Minute
 
-	// Kirim ke semua klien
-	for client := range s.clients {
-		// Non-blocking send untuk mencegah klien lambat menghambat server
-		select {
-		case client <- frameData:
-			// Frame berhasil dikirim
-		default:
-			// Skip klien yang lambat (buffer channel penuh)
+	for client, lastActive := range s.lastActivity {
+		if now.Sub(lastActive) > timeout {
+			if _, ok := s.clients[client]; ok {
+				delete(s.clients, client)
+				delete(s.lastActivity, client)
+				close(client)
+
+				if s.app != nil {
+					s.app.Logger.Info("Removed inactive client due to timeout")
+				}
+			}
 		}
 	}
 }
 
-// handleStream adalah handler untuk request MJPEG stream
+func (s *StreamService) broadcastFrame(frameData []byte) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+
+	s.frameCache = frameData
+
+	now := time.Now()
+	for client := range s.clients {
+		select {
+		case client <- frameData:
+			s.lastActivity[client] = now
+		default:
+		}
+	}
+}
+
 func (s *StreamService) handleStream(w http.ResponseWriter, r *http.Request) {
-	// MJPEG stream memerlukan header khusus
+	ctx, cancel := context.WithTimeout(r.Context(), 1*time.Hour)
+	defer cancel()
+
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Connection", "close")
@@ -141,24 +163,19 @@ func (s *StreamService) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "*")
 
-	// Channel untuk menerima frame
-	frameChan := make(chan []byte, 10) // Buffer beberapa frame
+	frameChan := make(chan []byte, 10)
 
-	// Register klien baru
 	s.registerClient(frameChan)
 	defer s.unregisterClient(frameChan)
 
-	// Jika ada frame di cache, kirim segera
 	if s.frameCache != nil {
 		s.sendMJPEGFrame(w, s.frameCache)
 	}
 
-	// Flush header ke client
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
 
-	// Loop untuk mengirim frame ke browser
 	for {
 		select {
 		case frame := <-frameChan:
@@ -170,23 +187,25 @@ func (s *StreamService) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// Flush frame ke client
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 
 		case <-r.Context().Done():
-			// Client terputus
+			return
+
+		case <-ctx.Done():
 			return
 
 		case <-s.stopChan:
-			// Server dihentikan
+			return
+
+		case <-s.ctx.Done():
 			return
 		}
 	}
 }
 
-// sendMJPEGFrame mengirim sebuah frame sebagai MJPEG ke client
 func (s *StreamService) sendMJPEGFrame(w io.Writer, frame []byte) error {
 	_, err := fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(frame))
 	if err != nil {
@@ -202,8 +221,7 @@ func (s *StreamService) sendMJPEGFrame(w io.Writer, frame []byte) error {
 	return err
 }
 
-// handleOptions merespon pre-flight CORS requests
-func (s *StreamService) handleOptions(w http.ResponseWriter, r *http.Request) {
+func (s *StreamService) handleOptions(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "*")
@@ -211,7 +229,6 @@ func (s *StreamService) handleOptions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// frameGenerator membaca image input, convert ke JPEG dan broadcastnya
 func (s *StreamService) frameGenerator() {
 	s.mu.Lock()
 	inputFile := s.config.InputFile
@@ -221,12 +238,21 @@ func (s *StreamService) frameGenerator() {
 
 	interval := time.Second / time.Duration(frameRate)
 
+	buf := new(bytes.Buffer)
+	buf.Grow(1024 * 1024)
+
+	cleanupTicker := time.NewTicker(30 * time.Second)
+	defer cleanupTicker.Stop()
+
 	for {
 		select {
 		case <-s.stopChan:
 			return
+		case <-s.ctx.Done():
+			return
+		case <-cleanupTicker.C:
+			s.cleanupInactiveClients()
 		default:
-			// Cek apakah file ada
 			if _, err := os.Stat(inputFile); os.IsNotExist(err) {
 				if s.app != nil {
 					s.app.Logger.Error(fmt.Sprintf("Image file not found: %s", inputFile))
@@ -235,7 +261,6 @@ func (s *StreamService) frameGenerator() {
 				continue
 			}
 
-			// Baca file
 			file, err := os.Open(inputFile)
 			if err != nil {
 				if s.app != nil {
@@ -245,7 +270,6 @@ func (s *StreamService) frameGenerator() {
 				continue
 			}
 
-			// Decode image
 			img, _, err := image.Decode(file)
 			file.Close()
 			if err != nil {
@@ -256,8 +280,8 @@ func (s *StreamService) frameGenerator() {
 				continue
 			}
 
-			// Encode ke JPEG dengan kualitas yang dikonfigurasi
-			buf := new(bytes.Buffer)
+			buf.Reset()
+
 			err = jpeg.Encode(buf, img, &jpeg.Options{Quality: quality})
 			if err != nil {
 				if s.app != nil {
@@ -267,16 +291,13 @@ func (s *StreamService) frameGenerator() {
 				continue
 			}
 
-			// Broadcast frame
 			s.broadcastFrame(buf.Bytes())
 
-			// Tunggu untuk frame berikutnya berdasarkan framerate
 			time.Sleep(interval)
 		}
 	}
 }
 
-// StartStream memulai server MJPEG
 func (s *StreamService) StartStream() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -285,9 +306,7 @@ func (s *StreamService) StartStream() (string, error) {
 		return "Stream is already running", nil
 	}
 
-	// Validate input file exists
 	if _, err := os.Stat(s.config.InputFile); os.IsNotExist(err) {
-		// If the input file doesn't exist at the absolute path, check relative to executable
 		execPath, _ := os.Executable()
 		appDir := filepath.Dir(execPath)
 		relativePath := filepath.Join(appDir, s.config.InputFile)
@@ -299,16 +318,14 @@ func (s *StreamService) StartStream() (string, error) {
 		}
 	}
 
-	// Init channels
 	s.stopChan = make(chan struct{})
 	s.clients = make(map[chan []byte]bool)
+	s.lastActivity = make(map[chan []byte]time.Time)
 
-	// Setup server mux
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", s.handleStream)
-	mux.HandleFunc("/stream/", s.handleStream) // Handle /stream/ juga
+	mux.HandleFunc("/stream/", s.handleStream)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Root handler untuk menampilkan HTML sederhana dengan embed video stream
 		if r.Method == http.MethodOptions {
 			s.handleOptions(w, r)
 			return
@@ -333,13 +350,11 @@ func (s *StreamService) StartStream() (string, error) {
 		`)))
 	})
 
-	// Buat HTTP server
 	s.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.config.Port),
 		Handler: mux,
 	}
 
-	// Start server di goroutine terpisah
 	go func() {
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP server error: %v\n", err)
@@ -349,7 +364,6 @@ func (s *StreamService) StartStream() (string, error) {
 		}
 	}()
 
-	// Start frame generator di goroutine terpisah
 	go s.frameGenerator()
 
 	s.config.IsRunning = true
@@ -361,7 +375,6 @@ func (s *StreamService) StartStream() (string, error) {
 	return fmt.Sprintf("MJPEG stream started at http://localhost:%d/stream", s.config.Port), nil
 }
 
-// StopStream menghentikan server MJPEG
 func (s *StreamService) StopStream() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -370,10 +383,8 @@ func (s *StreamService) StopStream() (string, error) {
 		return "No active stream to stop", nil
 	}
 
-	// Signal all goroutines to stop
 	close(s.stopChan)
 
-	// Shutdown HTTP server
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -387,12 +398,12 @@ func (s *StreamService) StopStream() (string, error) {
 		s.server = nil
 	}
 
-	// Clear all clients
 	s.clientsMu.Lock()
 	for client := range s.clients {
 		close(client)
 	}
 	s.clients = make(map[chan []byte]bool)
+	s.lastActivity = make(map[chan []byte]time.Time)
 	s.clientsMu.Unlock()
 
 	s.config.IsRunning = false
@@ -410,12 +421,15 @@ func (s *StreamService) IsStreamRunning() bool {
 	return s.config.IsRunning
 }
 
-// ServiceShutdown dipanggil ketika aplikasi ditutup
-func (s *StreamService) ServiceShutdown() error {
+func (s *StreamService) OnShutdown() error {
 	return s.Cleanup()
 }
 
 func (s *StreamService) Cleanup() error {
+	if s.cancelFunc != nil {
+		s.cancelFunc()
+	}
+
 	_, err := s.StopStream()
 	return err
 }

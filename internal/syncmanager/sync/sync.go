@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,7 +34,7 @@ type Synchronizer struct {
 	inSyncProcess bool
 	mu            sync.Mutex
 	db            *gorm.DB
-	mqttSender    *mqtt.Sender // Added MQTT sender
+	mqttSender    *mqtt.Sender
 }
 
 type DataEntry struct {
@@ -57,7 +58,6 @@ type CSVRecord struct {
 	SyncStatus bool
 }
 
-// NewSynchronizer creates a new synchronizer with MQTT sender
 func NewSynchronizer(config *config.Config, logger *logger.Logger, db *gorm.DB, mqttSender *mqtt.Sender) *Synchronizer {
 	return &Synchronizer{
 		config:     config,
@@ -75,15 +75,13 @@ func (s *Synchronizer) Start() error {
 
 	ticker := time.NewTicker(interval)
 
-	// Run initial sync
 	go func() {
-		s.syncData()
+		s.SyncData()
 		if err := s.UpdateFolderSyncStatus(); err != nil {
 			s.logger.Warn(ComponentSynchronizer, "Failed to update folder sync status: %v", err)
 		}
 	}()
 
-	// Start background goroutine for periodic syncing
 	go func() {
 		defer ticker.Stop()
 
@@ -101,7 +99,7 @@ func (s *Synchronizer) Start() error {
 							s.inSyncProcess = false
 							s.mu.Unlock()
 						}()
-						s.syncData()
+						s.SyncData()
 					}()
 				} else {
 					s.mu.Unlock()
@@ -128,7 +126,7 @@ func (s *Synchronizer) Stop() error {
 	return nil
 }
 
-func (s *Synchronizer) syncData() {
+func (s *Synchronizer) SyncData() {
 	s.logger.Info(ComponentSynchronizer, "Starting data synchronization")
 
 	syncedFolders, err := s.getFullySyncedFolders()
@@ -150,13 +148,11 @@ func (s *Synchronizer) syncData() {
 	for _, dateFolder := range dateFolders {
 		folderName := filepath.Base(dateFolder)
 
-		// Check if this folder is fully synced
 		isSynced := false
 		var syncedFileCount int = 0
 		if syncedFolders != nil {
 			if _, ok := syncedFolders[folderName]; ok {
 				isSynced = true
-				// Get the synced file count from database
 				var folder models.SyncedFolder
 				if err := s.db.Where("folder_name = ?", folderName).First(&folder).Error; err == nil {
 					syncedFileCount = folder.TotalFiles
@@ -174,12 +170,178 @@ func (s *Synchronizer) syncData() {
 	}
 }
 
+func (s *Synchronizer) GetStatus() map[string]interface{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return map[string]interface{}{
+		"running":         true,
+		"in_sync_process": s.inSyncProcess,
+		"last_sync_time":  time.Now().Format(time.RFC3339),
+	}
+}
+
+func (s *Synchronizer) GetSyncedFoldersDetails() ([]map[string]interface{}, error) {
+	var syncedFolders []models.SyncedFolder
+	if err := s.db.Find(&syncedFolders).Error; err != nil {
+		return nil, err
+	}
+
+	result := make([]map[string]interface{}, 0, len(syncedFolders))
+	for _, folder := range syncedFolders {
+		result = append(result, map[string]interface{}{
+			"folder_name":  folder.FolderName,
+			"last_checked": folder.LastChecked.Format(time.RFC3339),
+			"fully_synced": folder.FullySynced,
+			"total_files":  folder.TotalFiles,
+		})
+	}
+
+	return result, nil
+}
+
+func (s *Synchronizer) GetSyncedFoldersList() ([]string, error) {
+	syncedFolders, err := s.getFullySyncedFolders()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]string, 0, len(syncedFolders))
+	for folder := range syncedFolders {
+		result = append(result, folder)
+	}
+
+	return result, nil
+}
+
+func (s *Synchronizer) ResyncFolder(folderName string) error {
+	var folder models.SyncedFolder
+	result := s.db.Where("folder_name = ?", folderName).First(&folder)
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	folder.FullySynced = false
+	folder.LastChecked = time.Now()
+
+	if err := s.db.Save(&folder).Error; err != nil {
+		return err
+	}
+
+	go s.SyncData()
+
+	return nil
+}
+
+func (s *Synchronizer) GetFileProcessingStatus(filename string, folderName string) (map[string]interface{}, error) {
+	var count int64
+	if err := s.db.Model(&models.ProcessedFile{}).
+		Where("filename = ? AND date_folder = ?", filename, folderName).
+		Count(&count).Error; err != nil {
+		return nil, err
+	}
+
+	if count == 0 {
+		return map[string]interface{}{
+			"filename":  filename,
+			"folder":    folderName,
+			"processed": false,
+		}, nil
+	}
+
+	var processedFile models.ProcessedFile
+	if err := s.db.Where("filename = ? AND date_folder = ?", filename, folderName).
+		First(&processedFile).Error; err != nil {
+		return nil, err
+	}
+
+	var dataMap map[string]interface{}
+	if err := json.Unmarshal([]byte(processedFile.DataJSON), &dataMap); err != nil {
+		dataMap = map[string]interface{}{
+			"error": "Failed to parse data JSON",
+		}
+	}
+
+	return map[string]interface{}{
+		"filename":     filename,
+		"folder":       folderName,
+		"processed":    true,
+		"processed_at": processedFile.ProcessedAt.Format(time.RFC3339),
+		"data":         dataMap,
+	}, nil
+}
+
 func (s *Synchronizer) processDateFolder(dateFolder, folderName string, previouslySynced bool, syncedFileCount int) error {
+	if previouslySynced {
+		actualFileCount := 0
+		entries, err := os.ReadDir(dateFolder)
+		if err != nil {
+			return fmt.Errorf("could not read directory %s: %w", folderName, err)
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() && entry.Name() != "data.csv" && strings.HasSuffix(entry.Name(), ".json.bson") {
+				actualFileCount++
+			}
+		}
+
+		if actualFileCount == syncedFileCount {
+			s.logger.Info(ComponentSynchronizer, "Folder %s is already synced with %d files and file count matches, skipping",
+				folderName, syncedFileCount)
+			return nil
+		}
+
+		s.logger.Info(ComponentSynchronizer, "Folder %s has %d files but database shows %d synced files, checking for changes",
+			folderName, actualFileCount, syncedFileCount)
+	}
+
 	csvPath := filepath.Join(dateFolder, "data.csv")
+
+	if _, err := os.Stat(csvPath); os.IsNotExist(err) {
+		s.logger.Info(ComponentSynchronizer, "Creating new CSV file for folder %s", folderName)
+
+		if err := writeCSVFile(csvPath, []CSVRecord{}); err != nil {
+			return fmt.Errorf("failed to create CSV file for %s: %w", folderName, err)
+		}
+	}
 
 	csvEntries, err := readCSVFile(csvPath)
 	if err != nil {
 		return fmt.Errorf("could not read CSV file for %s: %w", folderName, err)
+	}
+
+	allDataFiles, err := s.getDataFilesInDirectory(dateFolder)
+	if err != nil {
+		return fmt.Errorf("could not read directory %s: %w", folderName, err)
+	}
+
+	existingEntries := make(map[string]bool)
+	for _, entry := range csvEntries {
+		existingEntries[entry.Filename] = true
+	}
+
+	var newFiles []string
+	for _, file := range allDataFiles {
+		fileName := fmt.Sprintf("%s/%s", folderName, file)
+		if !existingEntries[fileName] {
+			newFiles = append(newFiles, file)
+			csvEntries = append(csvEntries, CSVRecord{
+				Filename:   fileName,
+				SyncStatus: false,
+			})
+			s.logger.Info(ComponentSynchronizer, "Found new file: %s in folder %s", file, folderName)
+		}
+	}
+
+	if len(newFiles) > 0 {
+		s.logger.Info(ComponentSynchronizer, "Adding %d new files to CSV for folder %s", len(newFiles), folderName)
+
+		if err := writeCSVFile(csvPath, csvEntries); err != nil {
+			return fmt.Errorf("error updating CSV file with new files %s: %w", csvPath, err)
+		}
+
+		previouslySynced = false
 	}
 
 	if previouslySynced && len(csvEntries) == syncedFileCount && isAllSynced(csvEntries) {
@@ -188,14 +350,21 @@ func (s *Synchronizer) processDateFolder(dateFolder, folderName string, previous
 		return nil
 	}
 
-	if previouslySynced {
-		s.logger.Info(ComponentSynchronizer, "Folder %s was previously synced with %d files, but now has %d files. Processing new files.",
+	if previouslySynced && len(csvEntries) != syncedFileCount {
+		s.logger.Warning(ComponentSynchronizer,
+			"Folder %s was previously synced with %d files, but now has %d files. Processing all unsynced files.",
 			folderName, syncedFileCount, len(csvEntries))
 	}
 
 	for i := range csvEntries {
 		if csvEntries[i].SyncStatus {
-			s.logger.Info(ComponentSynchronizer, "Skipping already processed file: %s", csvEntries[i].Filename)
+			s.logger.Debug(ComponentSynchronizer, "Skipping already processed file: %s", csvEntries[i].Filename)
+			continue
+		}
+
+		filePath := filepath.Join(s.config.BaseConfig.ServicesDataDir, csvEntries[i].Filename)
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			s.logger.Warning(ComponentSynchronizer, "File %s is in CSV but does not exist in filesystem", csvEntries[i].Filename)
 			continue
 		}
 
@@ -214,7 +383,6 @@ func (s *Synchronizer) processDateFolder(dateFolder, folderName string, previous
 			continue
 		}
 
-		filePath := filepath.Join(s.config.BaseConfig.ServicesDataDir, csvEntries[i].Filename)
 		if err := s.processFile(filePath, csvEntries[i].Filename, folderName); err != nil {
 			s.logger.Error(ComponentSynchronizer, "Error processing file %s: %v", filePath, err)
 			continue
@@ -227,11 +395,64 @@ func (s *Synchronizer) processDateFolder(dateFolder, folderName string, previous
 		return fmt.Errorf("error updating CSV file %s: %w", csvPath, err)
 	}
 
+	finalFiles, err := s.getDataFilesInDirectory(dateFolder)
+	if err == nil {
+		existingEntries = make(map[string]bool)
+		for _, entry := range csvEntries {
+			existingEntries[entry.Filename] = true
+		}
+
+		var missedFiles []string
+		for _, file := range finalFiles {
+			if !existingEntries[file] {
+				missedFiles = append(missedFiles, file)
+			}
+		}
+
+		if len(missedFiles) > 0 {
+			s.logger.Warning(ComponentSynchronizer, "Found %d files after processing that weren't in CSV. Adding them now.", len(missedFiles))
+
+			for _, file := range missedFiles {
+				fileName := fmt.Sprintf("%s/%s", folderName, file)
+				csvEntries = append(csvEntries, CSVRecord{
+					Filename:   fileName,
+					SyncStatus: false,
+				})
+			}
+
+			if err := writeCSVFile(csvPath, csvEntries); err != nil {
+				s.logger.Error(ComponentSynchronizer, "Error updating CSV file with missed files: %v", err)
+			}
+
+			return nil
+		}
+	}
+
 	if isAllSynced(csvEntries) {
 		return s.markFolderAsSynced(folderName, len(csvEntries))
 	}
 
 	return nil
+}
+
+func (s *Synchronizer) getDataFilesInDirectory(dirPath string) ([]string, error) {
+	files, err := os.ReadDir(dirPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read directory: %w", err)
+	}
+
+	var dataFiles []string
+	for _, file := range files {
+		if file.IsDir() || file.Name() == "data.csv" {
+			continue
+		}
+
+		if strings.HasSuffix(file.Name(), ".json.bson") {
+			dataFiles = append(dataFiles, file.Name())
+		}
+	}
+
+	return dataFiles, nil
 }
 
 func (s *Synchronizer) findDateFolders() ([]string, error) {
@@ -270,7 +491,6 @@ func (s *Synchronizer) processFile(filePath, filename, folderName string) error 
 		return fmt.Errorf("error decrypting and reading file: %w", err)
 	}
 
-	// Mark file as processed in database
 	if err := s.markFileAsProcessed(filename, folderName, data); err != nil {
 		return fmt.Errorf("error marking file as processed: %w", err)
 	}
@@ -295,14 +515,12 @@ func (s *Synchronizer) GetSetting(key string) (string, error) {
 	return setting.Value, nil
 }
 
-// sendDecryptedData sends the decrypted data to MQTT
 func (s *Synchronizer) sendDecryptedData(filename, folderName string, data map[string]interface{}) error {
 
 	if s.mqttSender == nil {
 		return fmt.Errorf("MQTT sender not initialized")
 	}
 
-	// Convert the data to DataEntry for more control
 	dataEntry, err := s.mapToDataEntry(data)
 	if err != nil {
 		return fmt.Errorf("error converting data to DataEntry: %w", err)
@@ -312,7 +530,6 @@ func (s *Synchronizer) sendDecryptedData(filename, folderName string, data map[s
 	tenantId, _ := s.GetSetting("tenant_id")
 	clientId, _ := s.GetSetting("client_id")
 
-	// Create payload with metadata
 	payload := map[string]interface{}{
 		"filename":     filename,
 		"date_folder":  folderName,
@@ -463,11 +680,9 @@ func (s *Synchronizer) markFileAsProcessed(filename, dateFolder string, data map
 		return fmt.Errorf("error converting data to DataEntry: %w", err)
 	}
 
-	// Create JSON representation of essential data
 	dataJSON := fmt.Sprintf(`{"id":"%s","cctv_id":%d,"device_id":"%s","in_count":%d,"out_count":%d}`,
 		dataEntry.ID, dataEntry.CCTVID, dataEntry.DeviceID, dataEntry.InCount, dataEntry.OutCount)
 
-	// Create processed file record
 	processedFile := models.ProcessedFile{
 		Filename:    filename,
 		DateFolder:  dateFolder,
@@ -586,7 +801,55 @@ func (s *Synchronizer) UpdateFolderSyncStatus() error {
 
 	for _, folder := range dateFolders {
 		folderName := filepath.Base(folder)
+
+		var existingFolder models.SyncedFolder
+		result := s.db.Where("folder_name = ?", folderName).First(&existingFolder)
+
+		if result.Error == nil && existingFolder.FullySynced {
+			actualFileCount := 0
+			entries, err := os.ReadDir(folder)
+			if err != nil {
+				s.logger.Warn(ComponentSynchronizer, "Could not read directory %s: %v", folderName, err)
+				continue
+			}
+
+			for _, entry := range entries {
+				if !entry.IsDir() && entry.Name() != "data.csv" && strings.HasSuffix(entry.Name(), ".json.bson") {
+					actualFileCount++
+				}
+			}
+
+			if actualFileCount == existingFolder.TotalFiles {
+				s.logger.Debug(ComponentSynchronizer, "Folder %s file count unchanged (%d files), skipping detailed check",
+					folderName, actualFileCount)
+
+				existingFolder.LastChecked = time.Now()
+				if err := s.db.Save(&existingFolder).Error; err != nil {
+					s.logger.Warn(ComponentSynchronizer, "Failed to update last checked timestamp for folder %s: %v",
+						folderName, err)
+				}
+				continue
+			}
+
+			s.logger.Info(ComponentSynchronizer, "Folder %s file count changed (DB: %d, Actual: %d), performing detailed check",
+				folderName, existingFolder.TotalFiles, actualFileCount)
+		}
+
 		csvPath := filepath.Join(folder, "data.csv")
+
+		if _, err := os.Stat(csvPath); os.IsNotExist(err) {
+			s.logger.Info(ComponentSynchronizer, "Creating new CSV file for folder %s during status update", folderName)
+			if err := writeCSVFile(csvPath, []CSVRecord{}); err != nil {
+				s.logger.Warn(ComponentSynchronizer, "Could not create CSV for folder %s: %v", folderName, err)
+				continue
+			}
+		}
+
+		actualFiles, err := s.getDataFilesInDirectory(folder)
+		if err != nil {
+			s.logger.Warn(ComponentSynchronizer, "Could not read directory %s: %v", folderName, err)
+			continue
+		}
 
 		entries, err := readCSVFile(csvPath)
 		if err != nil {
@@ -594,14 +857,33 @@ func (s *Synchronizer) UpdateFolderSyncStatus() error {
 			continue
 		}
 
-		// Check if the folder exists in the database
-		var existingFolder models.SyncedFolder
-		result := s.db.Where("folder_name = ?", folderName).First(&existingFolder)
+		csvFiles := make(map[string]bool)
+		for _, entry := range entries {
+			csvFiles[entry.Filename] = true
+		}
+
+		var newFiles []string
+		for _, file := range actualFiles {
+			fileName := fmt.Sprintf("%s/%s", folderName, file)
+			if !csvFiles[fileName] {
+				newFiles = append(newFiles, file)
+				entries = append(entries, CSVRecord{
+					Filename:   fileName,
+					SyncStatus: false,
+				})
+			}
+		}
+
+		if len(newFiles) > 0 {
+			s.logger.Info(ComponentSynchronizer, "Found %d new files for folder %s during status update", len(newFiles), folderName)
+			if err := writeCSVFile(csvPath, entries); err != nil {
+				s.logger.Warn(ComponentSynchronizer, "Failed to update CSV for folder %s: %v", folderName, err)
+				continue
+			}
+		}
 
 		if result.Error == nil {
-			// Folder exists in database
 			if len(entries) != existingFolder.TotalFiles || !isAllSynced(entries) {
-				// Either the number of files changed or not all files are synced
 				existingFolder.FullySynced = isAllSynced(entries)
 				existingFolder.TotalFiles = len(entries)
 				existingFolder.LastChecked = time.Now()
@@ -609,17 +891,31 @@ func (s *Synchronizer) UpdateFolderSyncStatus() error {
 				if err := s.db.Save(&existingFolder).Error; err != nil {
 					s.logger.Warn(ComponentSynchronizer, "Failed to update sync status for folder %s: %v", folderName, err)
 				}
+			} else {
+				existingFolder.LastChecked = time.Now()
+				if err := s.db.Save(&existingFolder).Error; err != nil {
+					s.logger.Warn(ComponentSynchronizer, "Failed to update last checked timestamp for folder %s: %v",
+						folderName, err)
+				}
 			}
 		} else if result.Error == gorm.ErrRecordNotFound {
-			// Folder doesn't exist yet
 			if isAllSynced(entries) {
 				err = s.markFolderAsSynced(folderName, len(entries))
 				if err != nil {
 					s.logger.Warn(ComponentSynchronizer, "Failed to update sync status for folder %s: %v", folderName, err)
 				}
+			} else if len(entries) > 0 {
+				folder := models.SyncedFolder{
+					FolderName:  folderName,
+					LastChecked: time.Now(),
+					FullySynced: false,
+					TotalFiles:  len(entries),
+				}
+				if err := s.db.Create(&folder).Error; err != nil {
+					s.logger.Warn(ComponentSynchronizer, "Failed to create sync status for folder %s: %v", folderName, err)
+				}
 			}
 		} else {
-			// Other database error
 			s.logger.Warn(ComponentSynchronizer, "Database error checking folder %s: %v", folderName, result.Error)
 		}
 	}
@@ -627,7 +923,6 @@ func (s *Synchronizer) UpdateFolderSyncStatus() error {
 	return nil
 }
 
-// SendSyncFolderSummary sends a summary of synced folders via MQTT
 func (s *Synchronizer) SendSyncFolderSummary() error {
 	if s.mqttSender == nil {
 		return fmt.Errorf("MQTT sender not initialized")
@@ -638,17 +933,14 @@ func (s *Synchronizer) SendSyncFolderSummary() error {
 		return fmt.Errorf("database error getting synced folders: %w", err)
 	}
 
-	// Create summary
 	summary := map[string]interface{}{
 		"timestamp":      time.Now().Format(time.RFC3339),
 		"total_folders":  len(syncedFolders),
 		"synced_folders": syncedFolders,
 	}
 
-	// Create topic for the summary
 	topic := fmt.Sprintf("%s/summary/folders", s.config.MQTT.Topic)
 
-	// Send the summary
 	s.logger.Info(ComponentSynchronizer, "Sending sync folder summary to MQTT topic %s", topic)
 	messageID, err := s.mqttSender.SendData(topic, summary)
 	if err != nil {
@@ -682,117 +974,4 @@ func decryptAndReadBSON(filePath, fernetKey string) (map[string]interface{}, err
 	}
 
 	return result, nil
-}
-
-func (s *Synchronizer) SyncData() {
-	s.syncData()
-}
-
-// GetStatus returns the current synchronizer status
-func (s *Synchronizer) GetStatus() map[string]interface{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return map[string]interface{}{
-		"running":         true,
-		"in_sync_process": s.inSyncProcess,
-		"last_sync_time":  time.Now().Format(time.RFC3339), // Replace with actual last sync time
-	}
-}
-
-// GetSyncedFoldersList returns a list of fully synced folders
-func (s *Synchronizer) GetSyncedFoldersList() ([]string, error) {
-	syncedFolders, err := s.getFullySyncedFolders()
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]string, 0, len(syncedFolders))
-	for folder := range syncedFolders {
-		result = append(result, folder)
-	}
-
-	return result, nil
-}
-
-// GetSyncedFoldersDetails returns detailed information about synced folders
-func (s *Synchronizer) GetSyncedFoldersDetails() ([]map[string]interface{}, error) {
-	var syncedFolders []models.SyncedFolder
-	if err := s.db.Find(&syncedFolders).Error; err != nil {
-		return nil, err
-	}
-
-	result := make([]map[string]interface{}, 0, len(syncedFolders))
-	for _, folder := range syncedFolders {
-		result = append(result, map[string]interface{}{
-			"folder_name":  folder.FolderName,
-			"last_checked": folder.LastChecked.Format(time.RFC3339),
-			"fully_synced": folder.FullySynced,
-			"total_files":  folder.TotalFiles,
-		})
-	}
-
-	return result, nil
-}
-
-// ResyncFolder forces a resync of a specific folder
-func (s *Synchronizer) ResyncFolder(folderName string) error {
-	// Mark folder as not fully synced in database
-	var folder models.SyncedFolder
-	result := s.db.Where("folder_name = ?", folderName).First(&folder)
-
-	if result.Error != nil {
-		return result.Error
-	}
-
-	folder.FullySynced = false
-	folder.LastChecked = time.Now()
-
-	if err := s.db.Save(&folder).Error; err != nil {
-		return err
-	}
-
-	// Trigger sync process
-	go s.syncData()
-
-	return nil
-}
-
-// GetFileProcessingStatus gets processing status for a file
-func (s *Synchronizer) GetFileProcessingStatus(filename string, folderName string) (map[string]interface{}, error) {
-	var count int64
-	if err := s.db.Model(&models.ProcessedFile{}).
-		Where("filename = ? AND date_folder = ?", filename, folderName).
-		Count(&count).Error; err != nil {
-		return nil, err
-	}
-
-	if count == 0 {
-		return map[string]interface{}{
-			"filename":  filename,
-			"folder":    folderName,
-			"processed": false,
-		}, nil
-	}
-
-	var processedFile models.ProcessedFile
-	if err := s.db.Where("filename = ? AND date_folder = ?", filename, folderName).
-		First(&processedFile).Error; err != nil {
-		return nil, err
-	}
-
-	var dataMap map[string]interface{}
-	if err := json.Unmarshal([]byte(processedFile.DataJSON), &dataMap); err != nil {
-		dataMap = map[string]interface{}{
-			"error": "Failed to parse data JSON",
-		}
-	}
-
-	return map[string]interface{}{
-		"filename":     filename,
-		"folder":       folderName,
-		"processed":    true,
-		"processed_at": processedFile.ProcessedAt.Format(time.RFC3339),
-		"data":         dataMap,
-	}, nil
 }
